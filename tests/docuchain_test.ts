@@ -8,14 +8,14 @@ import {
 import { assertEquals } from 'https://deno.land/std@0.90.0/testing/asserts.ts';
 
 Clarinet.test({
-  name: "Can store a new document",
+  name: "Can store a new document with metadata",
   async fn(chain: Chain, accounts: Map<string, Account>) {
     const wallet_1 = accounts.get("wallet_1")!;
     const documentHash = "0x0000000000000000000000000000000000000000000000000000000000000001";
     
     let block = chain.mineBlock([
       Tx.contractCall("docuchain", "store-document", 
-        [types.buff(documentHash), types.utf8("test-doc")], 
+        [types.buff(documentHash), types.utf8("test-doc"), types.some(types.utf8("test metadata"))], 
         wallet_1.address
       )
     ]);
@@ -25,41 +25,35 @@ Clarinet.test({
 });
 
 Clarinet.test({
-  name: "Cannot store duplicate document",
+  name: "Cannot store document with empty name",
   async fn(chain: Chain, accounts: Map<string, Account>) {
     const wallet_1 = accounts.get("wallet_1")!;
     const documentHash = "0x0000000000000000000000000000000000000000000000000000000000000001";
     
     let block = chain.mineBlock([
       Tx.contractCall("docuchain", "store-document",
-        [types.buff(documentHash), types.utf8("test-doc")],
-        wallet_1.address
-      ),
-      Tx.contractCall("docuchain", "store-document",
-        [types.buff(documentHash), types.utf8("test-doc-2")],
+        [types.buff(documentHash), types.utf8(""), types.none()],
         wallet_1.address
       )
     ]);
     
-    assertEquals(block.receipts[0].result.expectOk(), true);
-    assertEquals(block.receipts[1].result.expectErr(), "u102");
+    assertEquals(block.receipts[0].result.expectErr(), "u103");
   },
 });
 
 Clarinet.test({
-  name: "Can transfer document ownership",
+  name: "Can update document metadata",
   async fn(chain: Chain, accounts: Map<string, Account>) {
     const wallet_1 = accounts.get("wallet_1")!;
-    const wallet_2 = accounts.get("wallet_2")!;
     const documentHash = "0x0000000000000000000000000000000000000000000000000000000000000001";
     
     let block = chain.mineBlock([
       Tx.contractCall("docuchain", "store-document",
-        [types.buff(documentHash), types.utf8("test-doc")],
+        [types.buff(documentHash), types.utf8("test-doc"), types.none()],
         wallet_1.address
       ),
-      Tx.contractCall("docuchain", "transfer-ownership",
-        [types.buff(documentHash), types.principal(wallet_2.address)],
+      Tx.contractCall("docuchain", "update-metadata",
+        [types.buff(documentHash), types.some(types.utf8("updated metadata"))],
         wallet_1.address
       )
     ]);
