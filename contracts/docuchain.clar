@@ -5,15 +5,17 @@
 (define-constant err-not-found (err u100))
 (define-constant err-unauthorized (err u101))
 (define-constant err-already-exists (err u102))
+(define-constant err-invalid-name (err u103))
 
-;; Data structures
+;; Data structures 
 (define-map documents
   { hash: (buff 32) }
   {
     owner: principal,
     name: (string-utf8 256),
     timestamp: uint,
-    verified: bool
+    verified: bool,
+    metadata: (optional (string-utf8 1024))
   })
 
 (define-map document-history
@@ -21,20 +23,23 @@
   { previous-owners: (list 20 principal) })
 
 ;; Public functions
-(define-public (store-document (document-hash (buff 32)) (name (string-utf8 256)))
+(define-public (store-document (document-hash (buff 32)) (name (string-utf8 256)) (metadata (optional (string-utf8 1024))))
   (let ((existing-doc (get-document-info document-hash)))
     (match existing-doc
       success (err err-already-exists)
-      error (begin
-        (map-set documents
-          { hash: document-hash }
-          {
-            owner: tx-sender,
-            name: name,
-            timestamp: block-height,
-            verified: true
-          })
-        (ok true)))))
+      error (if (> (len name) u0)
+        (begin
+          (map-set documents
+            { hash: document-hash }
+            {
+              owner: tx-sender,
+              name: name,
+              timestamp: block-height,
+              verified: true,
+              metadata: metadata
+            })
+          (ok true))
+        (err err-invalid-name)))))
 
 (define-public (verify-document (document-hash (buff 32)))
   (match (get-document-info document-hash)
@@ -51,6 +56,18 @@
           (map-set documents
             { hash: document-hash }
             (merge success { owner: new-owner }))
+          (ok true))
+        (err err-unauthorized)))))
+
+(define-public (update-metadata (document-hash (buff 32)) (new-metadata (optional (string-utf8 1024))))
+  (let ((doc-info (get-document-info document-hash)))
+    (match doc-info
+      error (err err-not-found)
+      success (if (is-eq tx-sender (get owner success))
+        (begin
+          (map-set documents
+            { hash: document-hash }
+            (merge success { metadata: new-metadata }))
           (ok true))
         (err err-unauthorized)))))
 
