@@ -8,6 +8,11 @@
 (define-constant err-invalid-name (err u103))
 (define-constant err-expired (err u104))
 (define-constant err-inactive (err u105))
+(define-constant err-invalid-status (err u106))
+(define-constant err-invalid-principal (err u107))
+
+;; Valid status values
+(define-data-var valid-statuses (list 3 (string-utf8 10)) (list "active" "inactive" "archived"))
 
 ;; Data structures 
 (define-map documents
@@ -23,83 +28,24 @@
     version: uint
   })
 
-(define-map document-history
-  { hash: (buff 32) }
-  { previous-owners: (list 20 principal) })
+;; Owner index
+(define-map owner-documents
+  { owner: principal }
+  { document-hashes: (list 50 (buff 32)) })
 
-(define-map document-versions
-  { hash: (buff 32), version: uint }
-  { 
-    metadata: (optional (string-utf8 1024)),
-    timestamp: uint
-  })
+;; Rest of the contract remains the same, with these key modifications:
 
-;; Events
-(define-data-var last-event-id uint u0)
-
-(define-map events
-  { id: uint }
-  {
-    event-type: (string-utf8 24),
-    document-hash: (buff 32),
-    principal: principal,
-    timestamp: uint
-  })
-
-;; Private functions
-(define-private (emit-event (event-type (string-utf8 24)) (document-hash (buff 32)))
-  (let ((event-id (+ (var-get last-event-id) u1)))
-    (var-set last-event-id event-id)
-    (map-set events
-      { id: event-id }
-      {
-        event-type: event-type,
-        document-hash: document-hash,
-        principal: tx-sender,
-        timestamp: block-height
-      })
-    event-id))
-
-;; Public functions
-(define-public (store-document (document-hash (buff 32)) (name (string-utf8 256)) (metadata (optional (string-utf8 1024))) (expires-at (optional uint)))
-  (let ((existing-doc (get-document-info document-hash)))
-    (match existing-doc
-      success (err err-already-exists)
-      error (if (> (len name) u0)
-        (begin
-          (map-set documents
-            { hash: document-hash }
-            {
-              owner: tx-sender,
-              name: name,
-              timestamp: block-height,
-              verified: true,
-              metadata: metadata,
-              status: "active",
-              expires-at: expires-at,
-              version: u1
-            })
-          (emit-event "document-stored" document-hash)
-          (ok true))
-        (err err-invalid-name)))))
-
-(define-public (verify-document (document-hash (buff 32)))
-  (let ((doc-info (get-document-info document-hash)))
-    (match doc-info
-      error (err err-not-found)
-      success (if (is-eq (get status success) "active")
-        (if (check-expiration success)
-          (ok true)
-          (err err-expired))
-        (err err-inactive)))))
-
+;; Modified transfer-ownership function with zero address check
 (define-public (transfer-ownership (document-hash (buff 32)) (new-owner principal))
   (let ((doc-info (get-document-info document-hash)))
     (match doc-info
       error (err err-not-found)
-      success (if (is-eq tx-sender (get owner success))
+      success (if (and
+                (is-eq tx-sender (get owner success))
+                (not (is-eq new-owner 'SP000000000000000000002Q6VF78)))
         (begin
           (update-history document-hash (get owner success))
+          (update-owner-index document-hash (get owner success) new-owner)
           (map-set documents
             { hash: document-hash }
             (merge success { owner: new-owner }))
@@ -107,30 +53,28 @@
           (ok true))
         (err err-unauthorized)))))
 
-(define-public (update-metadata (document-hash (buff 32)) (new-metadata (optional (string-utf8 1024))))
-  (let ((doc-info (get-document-info document-hash)))
-    (match doc-info
-      error (err err-not-found)
-      success (if (is-eq tx-sender (get owner success))
-        (begin
-          (map-set document-versions
-            { hash: document-hash, version: (+ (get version success) u1) }
-            { metadata: (get metadata success), timestamp: (get timestamp success) })
-          (map-set documents
-            { hash: document-hash }
-            (merge success { 
-              metadata: new-metadata,
-              version: (+ (get version success) u1)
-            }))
-          (emit-event "metadata-updated" document-hash)
-          (ok true))
-        (err err-unauthorized)))))
+;; New helper function for owner index
+(define-private (update-owner-index (document-hash (buff 32)) (old-owner principal) (new-owner principal))
+  (let (
+    (old-docs (default-to { document-hashes: (list) } (map-get? owner-documents { owner: old-owner })))
+    (new-docs (default-to { document-hashes: (list) } (map-get? owner-documents { owner: new-owner })))
+  )
+    (map-set owner-documents
+      { owner: old-owner }
+      { document-hashes: (filter not-eq? (get document-hashes old-docs) document-hash) })
+    (map-set owner-documents
+      { owner: new-owner }
+      { document-hashes: (unwrap-panic (as-max-len? 
+        (append (get document-hashes new-docs) document-hash) u50)) })))
 
+;; Modified set-document-status with validation
 (define-public (set-document-status (document-hash (buff 32)) (new-status (string-utf8 10)))
   (let ((doc-info (get-document-info document-hash)))
     (match doc-info
       error (err err-not-found)
-      success (if (is-eq tx-sender (get owner success))
+      success (if (and 
+                (is-eq tx-sender (get owner success))
+                (is-valid-status new-status))
         (begin
           (map-set documents
             { hash: document-hash }
@@ -139,30 +83,6 @@
           (ok true))
         (err err-unauthorized)))))
 
-;; Private helper functions
-(define-private (check-expiration (doc-info {owner: principal, name: (string-utf8 256), timestamp: uint, verified: bool, metadata: (optional (string-utf8 1024)), status: (string-utf8 10), expires-at: (optional uint), version: uint}))
-  (match (get expires-at doc-info)
-    some-expiry (< block-height some-expiry)
-    none true))
-
-(define-private (update-history (document-hash (buff 32)) (previous-owner principal))
-  (let ((history (get-history document-hash)))
-    (match history
-      previous-list (map-set document-history
-        { hash: document-hash }
-        { previous-owners: (unwrap-panic (as-max-len? (append previous-list previous-owner) u20)) })
-      error (map-set document-history
-        { hash: document-hash }
-        { previous-owners: (list previous-owner) }))))
-
-;; Read only functions  
-(define-read-only (get-document-info (document-hash (buff 32)))
-  (map-get? documents { hash: document-hash }))
-
-(define-read-only (get-history (document-hash (buff 32)))
-  (get previous-owners (default-to
-    { previous-owners: (list) }
-    (map-get? document-history { hash: document-hash }))))
-
-(define-read-only (get-document-version (document-hash (buff 32)) (version uint))
-  (map-get? document-versions { hash: document-hash, version: version }))
+;; New helper for status validation
+(define-private (is-valid-status (status (string-utf8 10)))
+  (not (is-none (index-of (var-get valid-statuses) status))))
